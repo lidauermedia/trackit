@@ -114,7 +114,7 @@
 <script>
 (function(){
   'use strict';
-  const LS_KEY='trackit_state_html_final_v2';
+  const LS_KEY='trackit_state_html_final_v3';
   // local date helpers (avoid UTC shift)
   const localISO=(d)=>{const y=d.getFullYear();const m=String(d.getMonth()+1).padStart(2,'0');const da=String(d.getDate()).padStart(2,'0');return `${y}-${m}-${da}`};
   const todayISO=()=> localISO(new Date());
@@ -132,49 +132,37 @@
   function button(lbl, cls='btn'){ const b=el('button',cls); b.textContent=lbl; b.type='button'; return b; }
   function showToast(t,sub){ const box=$('#toast'); $('#toast-title').textContent=t; $('#toast-sub').textContent=sub||''; box.classList.add('show'); clearTimeout(showToast.t); showToast.t=setTimeout(()=>box.classList.remove('show'),2200); }
 
-  // ===== STREAK / FREEZE (30-day threshold, auto bridge one missed day) =====
-  function getLogSet(ex){ return new Set(ex.logs.map(l=>l.dateISO)); }
-  function hasLog(ex,iso){ return getLogSet(ex).has(iso); }
-  function hasFrozen(ex,iso){ return new Set(ex.streak?.frozenDates||[]).has(iso); }
+  // ===== STREAK VIEW & AWARDS =====
+  const getLogSet=(ex)=> new Set(ex.logs.map(l=>l.dateISO));
+  const getFrozenSet=(ex)=> new Set(ex.streak?.frozenDates||[]);
+  const hasLog=(ex,iso)=> getLogSet(ex).has(iso);
+  const hasFrozen=(ex,iso)=> getFrozenSet(ex).has(iso);
 
-  // Count consecutive days up to the most recent performed day (today or before),
-  // allowing frozen days to *bridge* continuity without incrementing the count.
-  function computeStreak(ex){
-    const perf=getLogSet(ex);
-    const frozen=new Set(ex.streak?.frozenDates||[]);
-    let c=0; let d=todayISO(); let started=false;
-    while(true){
-      const did=perf.has(d), fr=frozen.has(d);
-      if(!started){ // skip leading days without logs/freezes (e.g., earlier today not yet performed)
-        if(!(did||fr)) { d=addDays(d,-1); if(d==='1970-01-01') break; continue; }
-        started=true;
-      }
-      if(did||fr){ if(did) c++; d=addDays(d,-1); }
-      else break;
-    }
-    // Award tokens: 1 freeze per full 30 days in current streak
+  // Count consecutive streak (only logged days count), allowing frozen days as bridges
+  function countStreakEndingAt(ex, anchorISO){
+    if(!anchorISO) return 0;
+    const perf=getLogSet(ex); const frozen=getFrozenSet(ex);
+    let c=0; let d=anchorISO;
+    while(true){ const did=perf.has(d), fr=frozen.has(d); if(did||fr){ if(did) c++; d=addDays(d,-1); } else break; }
+    return c;
+  }
+
+  // View logic: show count even before today's log if yesterday kept the streak; flame only when logged today
+  function computeStreakView(ex){
+    const t=todayISO(); const y=addDays(t,-1);
+    if(hasLog(ex,t)) return {count: countStreakEndingAt(ex,t), flameToday:true};
+    if(hasLog(ex,y) || hasFrozen(ex,y)) return {count: countStreakEndingAt(ex,y), flameToday:false};
+    return {count:0, flameToday:false};
+  }
+
+  // Award freeze tokens: 1 per full 30 logged days in the current active window (today if logged, else yesterday if streak alive)
+  function ensureAwards(ex){
+    const t=todayISO(); const y=addDays(t,-1);
+    const anchor = hasLog(ex,t) ? t : ((hasLog(ex,y)||hasFrozen(ex,y)) ? y : null);
+    const c = countStreakEndingAt(ex, anchor);
     const awarded=ex.streak?.awardedBy30s||0; const should=Math.floor(c/30); const newly=Math.max(0,should-awarded);
-    return {count:c, newlyEarned:newly, flameActive:c>0};
+    if(newly>0){ ex.streak=ex.streak||{frozenDates:[],freezeTokens:0,awardedBy30s:0}; ex.streak.freezeTokens+=newly; ex.streak.awardedBy30s+=newly; }
   }
-
-  // Award pass on load
-  (function awardOnBoot(){ let changed=false; state.exercises=state.exercises.map(ex=>{ const {newlyEarned}=computeStreak(ex); if(newlyEarned>0){ changed=true; return {...ex, streak:{ frozenDates:ex.streak?.frozenDates||[], freezeTokens:(ex.streak?.freezeTokens||0)+newlyEarned, awardedBy30s:(ex.streak?.awardedBy30s||0)+newlyEarned }};} return ex;}); if(changed) save(); })();
-
-  function autoBridgeSingleGapIfPossible(ex, tISO){
-    const yISO=addDays(tISO,-1); const byISO=addDays(tISO,-2);
-    const frozen=new Set(ex.streak?.frozenDates||[]);
-    const perf=getLogSet(ex);
-    const gapIsSingle = !perf.has(yISO) && !frozen.has(yISO) && perf.has(byISO);
-    if(gapIsSingle && (ex.streak?.freezeTokens||0)>0){
-      frozen.add(yISO);
-      ex.streak.frozenDates=[...frozen];
-      ex.streak.freezeTokens=(ex.streak.freezeTokens||0)-1;
-      return true;
-    }
-    return false;
-  }
-
-  function ensureAwards(ex){ const {newlyEarned}=computeStreak(ex); if(newlyEarned>0){ ex.streak=ex.streak||{frozenDates:[],freezeTokens:0,awardedBy30s:0}; ex.streak.freezeTokens+=newlyEarned; ex.streak.awardedBy30s=(ex.streak.awardedBy30s||0)+newlyEarned; } }
 
   // ===== PR (per unit) =====
   function migratePR(ex){
@@ -249,7 +237,9 @@
     const left=el('div');
     const title=el('div'); title.textContent=ex.name; title.style.fontWeight='800';
     const meta=el('div','muted-sm'); const prStr=getPRDisplay(ex); const prText=prStr?`PR ${prStr}`:null; const goalText=ex.goal?`Goal ${ex.goal.value} ${ex.goal.unit}`:null; meta.textContent=[prText,goalText].filter(Boolean).join(' · ');
-    const s=computeStreak(ex); const streak=el('div','row-gap'); const flame=el('span'); flame.textContent=s.flameActive?'🔥':''; const pill=el('span','pill'); pill.textContent=(s.count||0)+'d'; streak.append(flame,pill);
+
+    const view=computeStreakView(ex);
+    const streak=el('div','row-gap'); const flame=el('span'); flame.textContent=view.flameToday?'🔥':''; const pill=el('span','pill'); pill.textContent=(view.count||0)+'d'; streak.append(flame,pill);
     left.append(title,meta,streak);
 
     const right=el('div','row-gap');
@@ -274,7 +264,6 @@
     bSave.onclick=applySave; bSaveTop.onclick=applySave;
 
     bMark.onclick=()=>{ const v=iVal.value?Number(iVal.value):0; const w=(iW.value!==''? Number(iW.value):undefined); logToday(ex,{value:v,weight:w}); iVal.value=''; iW.value=''; punch(); };
-    // manual freeze only if not already logged today
     bFreeze.disabled=(ex.streak?.freezeTokens||0)<=0 || ex.logs.some(l=>l.dateISO===todayISO());
     bFreeze.onclick=()=> useFreezeToday(ex);
 
@@ -309,15 +298,21 @@
 
     // Auto-bridge a SINGLE missed day with a freeze (if available)
     ex.streak = ex.streak || {frozenDates:[], freezeTokens:0, awardedBy30s:0};
-    autoBridgeSingleGapIfPossible(ex, t);
+    // If exactly one missed day between last log and today, auto-freeze it
+    (function autoBridge(){
+      const perf=getLogSet(ex); const frozen=getFrozenSet(ex);
+      const y=addDays(t,-1), by=addDays(t,-2);
+      if(!perf.has(y) && !frozen.has(y) && perf.has(by) && (ex.streak.freezeTokens||0)>0){
+        frozen.add(y); ex.streak.frozenDates=[...frozen]; ex.streak.freezeTokens--; }
+    })();
 
-    // Recompute awards after this log
+    // Award tokens after logging
     ensureAwards(ex);
 
     save(); render(); const useWeight=(weight!=null && weight!==''); const unit=useWeight?'kg':(ex.metricType==='reps'?'reps':'sec'); const val=useWeight? Number(weight): Number(value||0); showToast(ex.name+' logged!', useWeight? (val+' kg') : (val+' '+unit));
   }
 
-  function useFreezeToday(ex){ const t=todayISO(); if((ex.streak?.freezeTokens||0)<=0) return; if(ex.logs.some(l=>l.dateISO===t)) return; const set=new Set(ex.streak?.frozenDates||[]); if(set.has(t)) return; set.add(t); ex.streak.frozenDates=[...set]; ex.streak.freezeTokens=(ex.streak.freezeTokens||0)-1; save(); render(); }
+  function useFreezeToday(ex){ const t=todayISO(); if((ex.streak?.freezeTokens||0)<=0) return; if(ex.logs.some(l=>l.dateISO===t)) return; const set=getFrozenSet(ex); if(set.has(t)) return; set.add(t); ex.streak.frozenDates=[...set]; ex.streak.freezeTokens=(ex.streak.freezeTokens||0)-1; save(); render(); }
 
   // Track Modal logic
   let trackTarget=null;
@@ -378,11 +373,10 @@
   function confirmDialog({title,body,confirmText='Confirm',onConfirm}){ $('#modal-title').textContent=title; $('#modal-body').textContent=body; $('#modal-confirm').textContent=confirmText; const close=()=> $('#modal').classList.remove('show'); const ok=()=>{ close(); onConfirm&&onConfirm(); cleanup(); }; function cleanup(){ $('#modal-confirm').removeEventListener('click', ok); $('#modal-cancel').removeEventListener('click', close); } $('#modal-confirm').addEventListener('click', ok); $('#modal-cancel').addEventListener('click', close); $('#modal').classList.add('show'); }
   function showDayModal(iso,items){ const body=$('#dayModalBody'); body.innerHTML=''; if(items.length===0){ const d=document.createElement('div'); d.className='muted'; d.textContent='No exercises logged.'; body.appendChild(d); } else { items.forEach(x=>{ const r=document.createElement('div'); r.className='row'; r.innerHTML=`<span>${x.name}</span><span class=\"muted-sm\">${x.detail}</span>`; body.appendChild(r); }); } const h=document.createElement('div'); h.className='muted-sm'; h.textContent=fmtLabel(iso); body.prepend(h); const close=()=> $('#dayModal').classList.remove('show'); $('#dayModalClose').onclick=close; $('#dayModal').classList.add('show'); }
 
-  function render(){ renderTabs(); const mount=$('#view'); mount.innerHTML=''; if(state.ui.tab==='Exercises') mount.appendChild(viewExercises()); if(state.ui.tab==='Log') mount.appendChild(viewLog()); if(state.ui.tab==='Goals') mount.appendChild(viewGoals()); if(state.ui.tab==='Settings') mount.appendChild(viewSettings()); }
-
-  // boot: migrate PRs and save if needed
+  // Boot: migrate PRs once
   (function migrateAll(){ let changed=false; state.exercises.forEach(ex=>{ const before=JSON.stringify(ex.pr); migratePR(ex); if(JSON.stringify(before)!==JSON.stringify(ex.pr)) changed=true; }); if(changed) save(); })();
 
+  function render(){ renderTabs(); const mount=$('#view'); mount.innerHTML=''; if(state.ui.tab==='Exercises') mount.appendChild(viewExercises()); if(state.ui.tab==='Log') mount.appendChild(viewLog()); if(state.ui.tab==='Goals') mount.appendChild(viewGoals()); if(state.ui.tab==='Settings') mount.appendChild(viewSettings()); }
   render();
 })();
 </script>
